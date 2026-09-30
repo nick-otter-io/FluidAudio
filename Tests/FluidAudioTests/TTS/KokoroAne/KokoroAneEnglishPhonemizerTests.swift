@@ -630,6 +630,149 @@ final class KokoroAneEnglishPhonemizerTests: XCTestCase {
         }
     }
 
+    // MARK: - Plural / past / `-ing`
+
+    /// Bases only. Inflected forms are absent, so stemming has to build them.
+    private let inflectionLexicon: [String: [String]] = [
+        "policy": ["p", "ˈ", "ɑ", "l", "ə", "s", "i"],
+        "detainee": ["d", "ɪ", "t", "ˈ", "A", "n", "i"],
+        "engine": ["ˈ", "ɛ", "n", "ʤ", "ə", "n"],
+        "app": ["ˈ", "æ", "p"],
+        "flatline": ["f", "l", "ˈ", "æ", "t", "l", "ˌ", "I", "n"],
+        "jump": ["ʤ", "ˈ", "ʌ", "m", "p"],
+        "rate": ["ɹ", "ˈ", "A", "t"],
+        "rat": ["ɹ", "ˈ", "æ", "t"],
+        "run": ["ɹ", "ˈ", "ʌ", "n"],
+        "make": ["m", "ˈ", "A", "k"],
+        "sing": ["s", "ˈ", "ɪ", "ŋ"],
+        "singe": ["s", "ˈ", "ɪ", "n", "ʤ"],
+        "bus": ["b", "ˈ", "ʌ", "s"],
+        "wait": ["w", "ˈ", "A", "t"],
+        "picnic": ["p", "ˈ", "ɪ", "k", "n", "ɪ", "k"],
+        "child": ["ʧ", "ˈ", "I", "l", "d"],
+        "children": ["ʧ", "ˈ", "ɪ", "l", "d", "ɹ", "ə", "n"],
+        "check-in": ["ʧ", "ˈ", "ɛ", "k", "ɪ", "n"],
+    ]
+
+    private func makeInflectionPhonemizer(
+        extra: [String: [String]] = [:],
+        custom: [String: String] = [:]
+    ) -> KokoroAneEnglishPhonemizer {
+        KokoroAneEnglishPhonemizer(
+            wordToPhonemes: inflectionLexicon.merging(extra) { _, new in new },
+            customLexicon: custom,
+            allowedPunctuation: punctuation
+        )
+    }
+
+    func testPluralStemsKnownBases() async throws {
+        let recorder = FallbackRecorder()
+        let phonemizer = makeInflectionPhonemizer()
+        let cases = [
+            "policies": "pˈɑləsiz",
+            "detainees": "dɪtˈAniz",
+            "engines": "ˈɛnʤənz",
+            "buses": "bˈʌsᵻz",
+            "apps": "ˈæps",
+        ]
+        for (word, expected) in cases {
+            let result = try await phonemizer.phonemize(word) { await recorder.g2p($0) }
+            XCTAssertEqual(result, expected, word)
+        }
+        let recorded = await recorder.words
+        XCTAssertTrue(recorded.isEmpty, "known plural stems must not reach G2P")
+    }
+
+    func testPastStemsKnownBases() async throws {
+        let recorder = FallbackRecorder()
+        let phonemizer = makeInflectionPhonemizer()
+        let cases = [
+            "flatlined": "flˈætlˌInd",
+            "jumped": "ʤˈʌmpt",
+            // Silent -e wins over the shorter `rat`.
+            "rated": "ɹˈAɾᵻd",
+        ]
+        for (word, expected) in cases {
+            let result = try await phonemizer.phonemize(word) { await recorder.g2p($0) }
+            XCTAssertEqual(result, expected, word)
+        }
+        let recorded = await recorder.words
+        XCTAssertTrue(recorded.isEmpty, "known past stems must not reach G2P")
+    }
+
+    func testProgressiveStemsKnownBases() async throws {
+        let recorder = FallbackRecorder()
+        let phonemizer = makeInflectionPhonemizer()
+        let cases = [
+            "running": "ɹˈʌnɪŋ",
+            "making": "mˈAkɪŋ",
+            // `sing` is tried before `singe`.
+            "singing": "sˈɪŋɪŋ",
+            "waiting": "wˈAɾɪŋ",
+            "picnicking": "pˈɪknɪkɪŋ",
+        ]
+        for (word, expected) in cases {
+            let result = try await phonemizer.phonemize(word) { await recorder.g2p($0) }
+            XCTAssertEqual(result, expected, word)
+        }
+        let recorded = await recorder.words
+        XCTAssertTrue(recorded.isEmpty, "known progressive stems must not reach G2P")
+    }
+
+    func testInflectionIsCaseInsensitive() async throws {
+        let result = try await makeInflectionPhonemizer().phonemize("Policies") { _ in ["<g2p>"] }
+        XCTAssertEqual(result, "pˈɑləsiz")
+    }
+
+    func testStoredInflectedFormBeatsStemming() async throws {
+        // `apps` in the lexicon must win over `app` + /s/.
+        let phonemizer = makeInflectionPhonemizer(extra: ["apps": ["æ", "p", "s"]])
+        let result = try await phonemizer.phonemize("apps") { _ in ["<g2p>"] }
+        XCTAssertEqual(result, "æps")
+    }
+
+    func testIrregularPluralStaysWholeWord() async throws {
+        let result = try await makeInflectionPhonemizer().phonemize("children") { _ in ["<g2p>"] }
+        XCTAssertEqual(result, "ʧˈɪldɹən")
+    }
+
+    func testUnknownInflectionGoesToG2PWhole() async throws {
+        let recorder = FallbackRecorder()
+        let result = try await makeInflectionPhonemizer()
+            .phonemize("zzzyxed") { await recorder.g2p($0) }
+        XCTAssertEqual(result, "<g2p:zzzyxed>")
+        let recorded = await recorder.words
+        XCTAssertEqual(recorded, ["zzzyxed"])
+    }
+
+    func testCustomStemOverrideAppliesToPlural() async throws {
+        let phonemizer = makeInflectionPhonemizer(custom: ["policy": "pɑlisi"])
+        let result = try await phonemizer.phonemize("policies") { _ in ["<g2p>"] }
+        XCTAssertEqual(result, "pɑlisiz")
+    }
+
+    func testHyphenatedPluralUsesWholeStemBeforeSplit() async throws {
+        let recorder = FallbackRecorder()
+        let result = try await makeInflectionPhonemizer()
+            .phonemize("check-ins") { await recorder.g2p($0) }
+        XCTAssertEqual(result, "ʧˈɛkɪnz")
+        let recorded = await recorder.words
+        XCTAssertTrue(recorded.isEmpty)
+    }
+
+    func testPastAndProgressiveSuffixesMatchMisaki() {
+        for voiceless in ["p", "k", "f", "θ", "ʃ", "s", "ʧ"] {
+            XCTAssertEqual(KokoroAneEnglishPhonemizer.past(after: "ˈɑ" + voiceless), "ˈɑ" + voiceless + "t")
+        }
+        XCTAssertEqual(KokoroAneEnglishPhonemizer.past(after: "ˈɑd"), "ˈɑdᵻd")
+        XCTAssertEqual(KokoroAneEnglishPhonemizer.past(after: "ˈɑn"), "ˈɑnd")
+        XCTAssertEqual(KokoroAneEnglishPhonemizer.past(after: "ɹˈAt"), "ɹˈAɾᵻd")
+        XCTAssertEqual(KokoroAneEnglishPhonemizer.past(after: "ˈɑkt"), "ˈɑktᵻd")
+        XCTAssertEqual(KokoroAneEnglishPhonemizer.past(after: "t"), "tɪd")
+        XCTAssertEqual(KokoroAneEnglishPhonemizer.progressive(after: "wˈAt"), "wˈAɾɪŋ")
+        XCTAssertEqual(KokoroAneEnglishPhonemizer.progressive(after: "ɹˈʌn"), "ɹˈʌnɪŋ")
+    }
+
     // MARK: - Without lexicon (pre-#691 behavior preserved)
 
     func testEmptyLexiconFallsBackToG2PForEveryWord() async throws {
