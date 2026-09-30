@@ -18,11 +18,15 @@ import Foundation
 ///      letter names after a full lexicon miss (issue #710)
 ///   7. whole-compound possessive stem lookup, using lexicons only
 ///      (`C-section's` → lexicon `C-section` + /z/)
-///   8. hyphenated-compound split after a whole-stem miss
+///   8. plural / past / `-ing` stemming for a known lexicon stem
+///      (`policies` → `policy` + /z/, `flatlined` → `flatline` + /d/,
+///      `running` → `run` + /ɪŋ/). An unknown stem is left whole.
+///      Apostrophes stay on the possessive path below.
+///   9. hyphenated-compound split after a whole-stem miss
 ///      (`land-use's` → `land` + lexicon `use's`) (issue #775)
-///   9. `-'s` stem + clitic for other known stems (`today's` → `today` + /z/),
+///   10. `-'s` stem + clitic for other known stems (`today's` → `today` + /z/),
 ///      including letter-name initialisms (`FBI's`)
-///   10. BART G2P CoreML fallback for OOV words (injected by the caller)
+///   11. BART G2P CoreML fallback for OOV words (injected by the caller)
 ///
 /// Punctuation supported by the chain's `vocab.json` (`, . ! ? ; …` etc.)
 /// is preserved and attached to the preceding word — Kokoro treats those
@@ -178,6 +182,13 @@ struct KokoroAneEnglishPhonemizer: Sendable {
             return possessive
         }
 
+        // Regular inflection, lexicon only. Runs before the hyphen split so
+        // `check-ins` can use a stored `check-in` instead of stemming `ins`.
+        // Apostrophe tokens stay on the possessive rules below.
+        if !lowered.contains("'"), let inflected = resolveInflection(lowered) {
+            return inflected
+        }
+
         // Whole token and whole possessive stem both missed: resolve parts
         // independently, preserving any explicit possessive entry on a part
         // (`land-use's` → `land` + `use's`). Ordinary compounds retain #775's
@@ -279,6 +290,96 @@ struct KokoroAneEnglishPhonemizer: Sendable {
         return resolved.joined(separator: " ")
     }
 
+    // MARK: - Plural / past / `-ing`
+
+    /// Misaki `stem_s` / `stem_ed` / `stem_ing`, minus the `'s` branch.
+    /// The stem must already be in a lexicon. This does not call G2P.
+    private func resolveInflection(_ lowered: String) -> String? {
+        if let stem = pluralStem(of: lowered), let ipa = lookupKnownStem(stem) {
+            return ipa + Self.clitic(after: ipa)
+        }
+        if let stem = pastStem(of: lowered), let ipa = lookupKnownStem(stem) {
+            return Self.past(after: ipa)
+        }
+        if let stem = progressiveStem(of: lowered), let ipa = lookupKnownStem(stem) {
+            return Self.progressive(after: ipa)
+        }
+        return nil
+    }
+
+    /// Lexicon hit for a stem: custom override, then the bundled Misaki entry.
+    /// No initialism spelling, compound split, or G2P.
+    private func lookupKnownStem(_ stem: String) -> String? {
+        if let custom = customLexicon[stem] ?? customLexicon[Self.normalizeKey(stem)], !custom.isEmpty {
+            return custom
+        }
+        return lookupMisakiWord(stem)
+    }
+
+    /// `engines` → `engine`, `buses` → `bus`, `policies` → `policy`.
+    /// First hit wins, matching Misaki: drop `-s`, then `-es` (not `-ies`), then `-ies` → `-y`.
+    private func pluralStem(of word: String) -> String? {
+        guard word.count >= 3, word.hasSuffix("s") else { return nil }
+        if !word.hasSuffix("ss") {
+            let stem = String(word.dropLast(1))
+            if lookupKnownStem(stem) != nil { return stem }
+        }
+        if word.count > 4, word.hasSuffix("es"), !word.hasSuffix("ies") {
+            let stem = String(word.dropLast(2))
+            if lookupKnownStem(stem) != nil { return stem }
+        }
+        if word.count > 4, word.hasSuffix("ies") {
+            let stem = String(word.dropLast(3)) + "y"
+            if lookupKnownStem(stem) != nil { return stem }
+        }
+        return nil
+    }
+
+    /// `flatlined` → `flatline`, `jumped` → `jump`.
+    /// Silent `-e` is tried first so `rated` stays `rate`, not `rat`.
+    private func pastStem(of word: String) -> String? {
+        guard word.count >= 4, word.hasSuffix("d") else { return nil }
+        if !word.hasSuffix("dd") {
+            let stem = String(word.dropLast(1))
+            if lookupKnownStem(stem) != nil { return stem }
+        }
+        if word.count > 4, word.hasSuffix("ed"), !word.hasSuffix("eed") {
+            let stem = String(word.dropLast(2))
+            if lookupKnownStem(stem) != nil { return stem }
+        }
+        return nil
+    }
+
+    /// `running` → `run`, `making` → `make`.
+    /// Drop `-ing` before the silent `-e` form, so `singing` stays `sing`, not `singe`.
+    private func progressiveStem(of word: String) -> String? {
+        guard word.count >= 5, word.hasSuffix("ing") else { return nil }
+        let dropped = String(word.dropLast(3))
+        if word.count > 5, lookupKnownStem(dropped) != nil {
+            return dropped
+        }
+        let silentE = dropped + "e"
+        if lookupKnownStem(silentE) != nil {
+            return silentE
+        }
+        if word.count > 5, Self.hasDoubledIngSuffix(word) {
+            let undoubled = String(word.dropLast(4))
+            if lookupKnownStem(undoubled) != nil { return undoubled }
+        }
+        return nil
+    }
+
+    /// `running` / `stopping` double the consonant; `picnicking` adds `-k-` before `-ing`.
+    private static func hasDoubledIngSuffix(_ word: String) -> Bool {
+        if word.hasSuffix("cking") { return true }
+        guard word.hasSuffix("ing"), word.count >= 5 else { return false }
+        let head = word.dropLast(3)
+        guard head.count >= 2, let last = head.last, let before = head.dropLast().last else {
+            return false
+        }
+        return last == before && "bcdgklmnprstvxz".contains(last)
+    }
+
     // MARK: - Possessive / `-'s` clitic
 
     /// Resolve a lower-cased token ending in `'s` as stem + `-s` clitic.
@@ -336,6 +437,39 @@ struct KokoroAneEnglishPhonemizer: Sendable {
         if voicelessNonSibilants.contains(last) { return "s" }
         if sibilants.contains(last) { return "ᵻz" }
         return "z"
+    }
+
+    /// Voiceless stops and fricatives that take /-t/ for the past suffix.
+    /// Misaki `Lexicon._ed`. `/t/` and `/d/` are handled separately.
+    private static let pastVoiceless: Set<Character> = ["p", "k", "f", "θ", "ʃ", "s", "ʧ"]
+
+    /// Vowels that flap a following `/t/` in the US lexicon (`US_TAUS` in Misaki).
+    private static let usTaus: Set<Character> = [
+        "A", "I", "O", "W", "Y", "i", "u", "æ", "ɑ", "ə", "ɛ", "ɪ", "ɹ", "ʊ", "ʌ",
+    ]
+
+    /// Past suffix for a known stem. US flapping: `rate` → `ɹˈA` + `ɾᵻd`.
+    static func past(after stemIPA: String) -> String {
+        guard let last = stemIPA.last else { return stemIPA }
+        if pastVoiceless.contains(last) { return stemIPA + "t" }
+        if last == "d" { return stemIPA + "ᵻd" }
+        if last != "t" { return stemIPA + "d" }
+        if stemIPA.count < 2 { return stemIPA + "ɪd" }
+        let previous = stemIPA[stemIPA.index(stemIPA.endIndex, offsetBy: -2)]
+        if usTaus.contains(previous) {
+            return String(stemIPA.dropLast()) + "ɾᵻd"
+        }
+        return stemIPA + "ᵻd"
+    }
+
+    /// Progressive suffix. A flappable `/t/` becomes `ɾɪŋ` (`wait` → `wˈAɾɪŋ`).
+    static func progressive(after stemIPA: String) -> String {
+        guard stemIPA.count > 1, stemIPA.last == "t" else { return stemIPA + "ɪŋ" }
+        let previous = stemIPA[stemIPA.index(stemIPA.endIndex, offsetBy: -2)]
+        if usTaus.contains(previous) {
+            return String(stemIPA.dropLast()) + "ɾɪŋ"
+        }
+        return stemIPA + "ɪŋ"
     }
 
     // MARK: - Letter-name initialisms (issue #710)
