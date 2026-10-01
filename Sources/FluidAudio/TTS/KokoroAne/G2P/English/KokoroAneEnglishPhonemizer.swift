@@ -33,6 +33,15 @@ import Foundation
 /// tokens as prosody/pause cues, matching upstream `KPipeline.g2p` output.
 /// Unlike the StyleTTS2 frontend, Misaki diphthong shorthand (`A O I Y W`)
 /// is NOT expanded: the laishere vocab carries those tokens directly.
+/// Words the English frontend handed to BART, in order.
+actor EnglishGraphemeFallbackTrace {
+    private(set) var words: [String] = []
+
+    func record(_ word: String) {
+        words.append(word)
+    }
+}
+
 struct KokoroAneEnglishPhonemizer: Sendable {
 
     private static let logger = AppLogger(category: "KokoroAneEnglishPhonemizer")
@@ -76,6 +85,7 @@ struct KokoroAneEnglishPhonemizer: Sendable {
     ///   empty or nothing could be resolved.
     func phonemize(
         _ text: String,
+        trace: EnglishGraphemeFallbackTrace? = nil,
         fallback: (String) async throws -> [String]?
     ) async throws -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -106,7 +116,7 @@ struct KokoroAneEnglishPhonemizer: Sendable {
                 continue
             }
 
-            if let ipa = try await resolveWord(token, fallback: fallback) {
+            if let ipa = try await resolveWord(token, trace: trace, fallback: fallback) {
                 parts.append(ipa)
             }
         }
@@ -129,6 +139,7 @@ struct KokoroAneEnglishPhonemizer: Sendable {
     private func resolveWord(
         _ word: String,
         allowFallback: Bool = true,
+        trace: EnglishGraphemeFallbackTrace? = nil,
         fallback: (String) async throws -> [String]?
     ) async throws -> String? {
         let normalized = Self.normalizeKey(word)
@@ -195,7 +206,7 @@ struct KokoroAneEnglishPhonemizer: Sendable {
         // behavior, including per-part G2P when needed.
         if word.contains("-"),
             let compound = try await resolveHyphenatedCompound(
-                word, allowFallback: allowFallback, fallback: fallback)
+                word, allowFallback: allowFallback, trace: trace, fallback: fallback)
         {
             return compound
         }
@@ -209,12 +220,13 @@ struct KokoroAneEnglishPhonemizer: Sendable {
         // `Lexicon.stem_s`. Glued entries that *do* exist won the lexicon
         // lookups above, so this only fires on genuine misses.
         if let possessive = try await resolvePossessive(
-            word, lowered: lowered, fallback: fallback)
+            word, lowered: lowered, trace: trace, fallback: fallback)
         {
             return possessive
         }
 
         guard allowFallback, !normalized.isEmpty else { return nil }
+        await trace?.record(normalized)
         do {
             if let phonemes = try await fallback(normalized), !phonemes.isEmpty {
                 return phonemes.joined()
@@ -270,6 +282,7 @@ struct KokoroAneEnglishPhonemizer: Sendable {
     private func resolveHyphenatedCompound(
         _ word: String,
         allowFallback: Bool = true,
+        trace: EnglishGraphemeFallbackTrace? = nil,
         fallback: (String) async throws -> [String]?
     ) async throws -> String? {
         let parts = word.split(separator: "-", omittingEmptySubsequences: true).map(String.init)
@@ -280,7 +293,7 @@ struct KokoroAneEnglishPhonemizer: Sendable {
         for part in parts {
             guard
                 let ipa = try await resolveWord(
-                    part, allowFallback: allowFallback, fallback: fallback),
+                    part, allowFallback: allowFallback, trace: trace, fallback: fallback),
                 !ipa.isEmpty
             else {
                 return nil
@@ -402,6 +415,7 @@ struct KokoroAneEnglishPhonemizer: Sendable {
     private func resolvePossessive(
         _ word: String,
         lowered: String,
+        trace: EnglishGraphemeFallbackTrace? = nil,
         fallback: (String) async throws -> [String]?
     ) async throws -> String? {
         // `len(word) < 3` in Misaki: a bare `'s` (and anything shorter than
@@ -411,7 +425,8 @@ struct KokoroAneEnglishPhonemizer: Sendable {
         guard !stem.isEmpty, !stem.hasSuffix("'") else { return nil }
 
         guard
-            let stemIPA = try await resolveWord(stem, allowFallback: false, fallback: fallback),
+            let stemIPA = try await resolveWord(
+                stem, allowFallback: false, trace: trace, fallback: fallback),
             !stemIPA.isEmpty
         else {
             return nil

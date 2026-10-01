@@ -745,6 +745,17 @@ final class KokoroAneEnglishPhonemizerTests: XCTestCase {
         XCTAssertEqual(recorded, ["zzzyxed"])
     }
 
+    func testGraphemeFallbackTraceRecordsOnlyUnknownWords() async throws {
+        let phonemizer = makeInflectionPhonemizer()
+        let trace = EnglishGraphemeFallbackTrace()
+        let result = try await phonemizer.phonemize("policies spadina", trace: trace) { word in
+            ["<g2p:\(word)>"]
+        }
+        XCTAssertEqual(result, "pˈɑləsiz <g2p:spadina>")
+        let recorded = await trace.words
+        XCTAssertEqual(recorded, ["spadina"])
+    }
+
     func testCustomStemOverrideAppliesToPlural() async throws {
         let phonemizer = makeInflectionPhonemizer(custom: ["policy": "pɑlisi"])
         let result = try await phonemizer.phonemize("policies") { _ in ["<g2p>"] }

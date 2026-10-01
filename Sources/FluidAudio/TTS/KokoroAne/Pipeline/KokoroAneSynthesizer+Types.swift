@@ -69,6 +69,9 @@ public struct KokoroAneSynthesisResult: Sendable {
     /// For chunked text input this is the full resolved string; the chunks
     /// drop the whitespace at each split and add one BOS/EOS pair per chunk.
     public internal(set) var phonemes: String
+    /// Lowercased words the English frontend sent to BART, in order.
+    /// Empty for other languages and for text that the lexicon covered.
+    public internal(set) var graphemeFallbackWords: [String]
     /// Per-stage timings.
     public let timings: KokoroAneStageTimings
 
@@ -86,7 +89,8 @@ public struct KokoroAneSynthesisResult: Sendable {
         inputIds: [Int32] = [],
         predictedDurations: [Int32] = [],
         normalizedText: String? = nil,
-        phonemes: String = ""
+        phonemes: String = "",
+        graphemeFallbackWords: [String] = []
     ) {
         self.samples = samples
         self.sampleRate = sampleRate
@@ -96,6 +100,7 @@ public struct KokoroAneSynthesisResult: Sendable {
         self.predictedDurations = predictedDurations
         self.normalizedText = normalizedText
         self.phonemes = phonemes
+        self.graphemeFallbackWords = graphemeFallbackWords
         self.timings = timings
     }
 
