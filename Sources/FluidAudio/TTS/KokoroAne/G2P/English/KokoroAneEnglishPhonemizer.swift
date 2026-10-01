@@ -18,11 +18,15 @@ import Foundation
 ///      letter names after a full lexicon miss (issue #710)
 ///   7. whole-compound possessive stem lookup, using lexicons only
 ///      (`C-section's` → lexicon `C-section` + /z/)
-///   8. hyphenated-compound split after a whole-stem miss
+///   8. plural / past / `-ing` stemming for a known lexicon stem
+///      (`policies` → `policy` + /z/, `flatlined` → `flatline` + /d/,
+///      `running` → `run` + /ɪŋ/). An unknown stem is left whole.
+///      Apostrophes stay on the possessive path below.
+///   9. hyphenated-compound split after a whole-stem miss
 ///      (`land-use's` → `land` + lexicon `use's`) (issue #775)
-///   9. `-'s` stem + clitic for other known stems (`today's` → `today` + /z/),
+///   10. `-'s` stem + clitic for other known stems (`today's` → `today` + /z/),
 ///      including letter-name initialisms (`FBI's`)
-///   10. BART G2P CoreML fallback for OOV words (injected by the caller)
+///   11. BART G2P CoreML fallback for OOV words (injected by the caller)
 ///
 /// Punctuation supported by the chain's `vocab.json` (`, . ! ? ; …` etc.)
 /// is preserved and attached to the preceding word — Kokoro treats those
