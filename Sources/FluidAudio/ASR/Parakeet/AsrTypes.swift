@@ -53,6 +53,12 @@ public struct ASRConfig: Sendable {
     /// probe when `seamGapRepair` is enabled.
     public let seamGapRepairMinGapSeconds: Double
 
+    /// Take seam-token timing from the window that decoded the token away
+    /// from its own edge (default `true`) — see "Seam Timing"
+    /// (Documentation/ASR/LongTranscription.md). Text is unaffected by the
+    /// rule itself; set `false` to reproduce pre-change timings.
+    public let seamTimingRealignment: Bool
+
     public static let `default` = ASRConfig()
 
     public init(
@@ -65,7 +71,8 @@ public struct ASRConfig: Sendable {
         melChunkContext: Bool? = nil,
         dualDecodeArbitration: Bool = false,
         seamGapRepair: Bool = true,
-        seamGapRepairMinGapSeconds: Double = 1.5
+        seamGapRepairMinGapSeconds: Double = 1.5,
+        seamTimingRealignment: Bool = true
     ) {
         self.sampleRate = sampleRate
         self.tdtConfig = tdtConfig
@@ -77,11 +84,32 @@ public struct ASRConfig: Sendable {
         self.dualDecodeArbitration = dualDecodeArbitration
         self.seamGapRepair = seamGapRepair
         self.seamGapRepairMinGapSeconds = max(0.5, seamGapRepairMinGapSeconds)
+        self.seamTimingRealignment = seamTimingRealignment
     }
 
     /// Resolve the mel-context tri-state against the loaded model version.
     func resolvedMelChunkContext(for modelVersion: AsrModelVersion?) -> Bool {
         melChunkContextOverride ?? (modelVersion?.isV3Family != true)
+    }
+
+    /// A copy with the decoder-shape fields replaced and every other setting
+    /// carried over. Adapting a config to a loaded model goes through here so
+    /// that a flag added to `ASRConfig` cannot be dropped by a rebuild that
+    /// lists the fields by hand.
+    func replacing(tdtConfig: TdtConfig? = nil, encoderHiddenSize: Int? = nil) -> ASRConfig {
+        ASRConfig(
+            sampleRate: sampleRate,
+            tdtConfig: tdtConfig ?? self.tdtConfig,
+            encoderHiddenSize: encoderHiddenSize ?? self.encoderHiddenSize,
+            parallelChunkConcurrency: parallelChunkConcurrency,
+            streamingEnabled: streamingEnabled,
+            streamingThreshold: streamingThreshold,
+            melChunkContext: melChunkContextOverride,
+            dualDecodeArbitration: dualDecodeArbitration,
+            seamGapRepair: seamGapRepair,
+            seamGapRepairMinGapSeconds: seamGapRepairMinGapSeconds,
+            seamTimingRealignment: seamTimingRealignment
+        )
     }
 }
 
@@ -96,13 +124,19 @@ public struct ASRResult: Codable, Sendable {
     public let performanceMetrics: ASRPerformanceMetrics?
     public let ctcDetectedTerms: [String]?
     public let ctcAppliedTerms: [String]?
+    /// The rescoring decision behind each applied replacement, aligned 1:1 with
+    /// `ctcAppliedTerms`. Carries the decoded word each term displaced and the
+    /// scores the decision was made on, so callers can tell a recognizer error
+    /// from a bad vocabulary replacement. `nil` when boosting is not configured.
+    public let ctcReplacements: [VocabularyRescorer.RescoringResult]?
 
     public init(
         text: String, confidence: Float, duration: TimeInterval, processingTime: TimeInterval,
         tokenTimings: [TokenTiming]? = nil,
         performanceMetrics: ASRPerformanceMetrics? = nil,
         ctcDetectedTerms: [String]? = nil,
-        ctcAppliedTerms: [String]? = nil
+        ctcAppliedTerms: [String]? = nil,
+        ctcReplacements: [VocabularyRescorer.RescoringResult]? = nil
     ) {
         self.text = text
         self.confidence = confidence
@@ -112,6 +146,7 @@ public struct ASRResult: Codable, Sendable {
         self.performanceMetrics = performanceMetrics
         self.ctcDetectedTerms = ctcDetectedTerms
         self.ctcAppliedTerms = ctcAppliedTerms
+        self.ctcReplacements = ctcReplacements
     }
 
     /// Real-time factor (RTFx) - how many times faster than real-time
@@ -125,8 +160,12 @@ public struct ASRResult: Codable, Sendable {
     ///   - text: The rescored transcript text
     ///   - detected: Vocabulary terms detected by CTC (candidates considered for replacement)
     ///   - applied: Vocabulary terms actually applied as replacements
+    ///   - replacements: The rescoring decision behind each applied term
     /// - Returns: A new ASRResult with updated text and CTC metadata
-    public func withRescoring(text: String, detected: [String]?, applied: [String]?) -> ASRResult {
+    public func withRescoring(
+        text: String, detected: [String]?, applied: [String]?,
+        replacements: [VocabularyRescorer.RescoringResult]? = nil
+    ) -> ASRResult {
         ASRResult(
             text: text,
             confidence: confidence,
@@ -135,7 +174,8 @@ public struct ASRResult: Codable, Sendable {
             tokenTimings: tokenTimings,
             performanceMetrics: performanceMetrics,
             ctcDetectedTerms: detected,
-            ctcAppliedTerms: applied
+            ctcAppliedTerms: applied,
+            ctcReplacements: replacements
         )
     }
 }
