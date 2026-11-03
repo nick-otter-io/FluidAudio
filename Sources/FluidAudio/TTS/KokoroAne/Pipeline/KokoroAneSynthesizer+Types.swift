@@ -83,6 +83,13 @@ public struct KokoroAneSynthesisResult: Sendable {
     /// Lowercased words the English frontend sent to BART, in order.
     /// Empty for other languages and for text that the lexicon covered.
     public internal(set) var graphemeFallbackWords: [String]
+    /// Tokens recorded by the English phonemize walk behind ``phonemes``.
+    ///
+    /// Empty for other languages, for phoneme input, and on the value
+    /// ``concatenating(_:)`` returns until the caller assigns the full string.
+    /// A skipped token has empty `phonemes` and nil `scalars`. The separator
+    /// space between kept tokens sits on the previous segment.
+    public internal(set) var englishSegments: [KokoroAneSpokenSegment]
     /// Per-stage timings.
     public let timings: KokoroAneStageTimings
 
@@ -105,6 +112,7 @@ public struct KokoroAneSynthesisResult: Sendable {
         normalizedText: String? = nil,
         phonemes: String = "",
         graphemeFallbackWords: [String] = [],
+        englishSegments: [KokoroAneSpokenSegment] = [],
         usedFastVocoder: Bool = false
     ) {
         self.samples = samples
@@ -116,14 +124,15 @@ public struct KokoroAneSynthesisResult: Sendable {
         self.normalizedText = normalizedText
         self.phonemes = phonemes
         self.graphemeFallbackWords = graphemeFallbackWords
+        self.englishSegments = englishSegments
         self.timings = timings
         self.usedFastVocoder = usedFastVocoder
     }
 
     /// Join per-chunk results in order: samples, ids and durations are
     /// concatenated; token/frame counts and stage timings are summed. Level is
-    /// left untouched (no per-chunk normalization). Text fields are left empty
-    /// for the caller to set.
+    /// left untouched (no per-chunk normalization). Text fields and
+    /// ``englishSegments`` are left empty for the caller to set.
     static func concatenating(_ parts: [KokoroAneSynthesisResult]) -> KokoroAneSynthesisResult {
         var timings = KokoroAneStageTimings()
         for part in parts { timings.add(part.timings) }
