@@ -662,7 +662,8 @@ FluidAudio ships two TTS backends:
 ### PocketTTS
 
 Streaming-friendly TTS with voice cloning support from short audio samples.
-Available language packs: `english` (default), `german`, `german_24l`,
+Available language packs: `english` (default, Kyutai's current `english_2026-10`),
+`english_2026-04` (the previous English pack), `german`, `german_24l`,
 `italian`, `italian_24l`, `portuguese`, `portuguese_24l`, `spanish`,
 `spanish_24l`, `french_24l` (24-layer only — no 6-layer French upstream).
 
@@ -767,7 +768,7 @@ swift run fluidaudiocli tts "Hello from FluidAudio." --backend paradee --voice b
 
 - `tests.yml`: Default build matrix covering SwiftPM tests and an iOS archive smoke test.
 - `diarizer-benchmark.yml`: Runs the streaming diarization benchmark on ES2004a for regression tracking.
-- `offline-pipeline.yml`: Executes the VBx offline pipeline end-to-end (`fluidaudio diarization-benchmark --mode offline`) and fails if DER/JER drift beyond guardrails or if models fail to download. Use this workflow as a reference for provisioning model caches in your own CI.
+- `offline-pipeline.yml`: Executes the VBx offline pipeline end-to-end on ES2004a (`fluidaudio diarization-benchmark --mode offline`), posts DER/JER/RTFx to the PR, and fails if the run produces no results (for example when models fail to download) or RTFx is 0. It does not gate on DER. Use this workflow as a reference for provisioning model caches in your own CI.
 
 ## Everything Else
 
