@@ -63,13 +63,15 @@ public struct TTS {
         // Parsed from the `--variant` flag (en/english/zh/mandarin).
         var kokoroAneVariant: KokoroAneVariant = .english
         var kokoroVersion: KokoroAneVersion = .legacy
+        // `--pause MARK=MS`, repeatable — KokoroAne punctuation pauses.
+        var kokoroPauses: [Character: Duration] = [:]
         // Inflect model size — only consulted when backend == .inflect.
         // Parsed from `--variant` (micro/nano) or the backend token
         // (inflect-micro / inflect-nano).
         var inflectVariant: InflectVariant = .micro
         // Paradee weight precision and release — only consulted when backend == .paradee.
         var paradeeVariant: ParadeeVariant = .int8
-        var paradeeVersion: ParadeeVersion = .v12
+        var paradeeVersion: ParadeeVersion = .v13
         var paradeeSpeed: Float = ParadeeConstants.defaultSpeed
         var paradeeSeed: UInt64 = 0
         var lexiconPath: String? = nil
@@ -152,6 +154,17 @@ public struct TTS {
                 i += 1
             case "--phonemes":
                 treatAsPhonemes = true
+            case "--pause":
+                guard i + 1 < arguments.count, let separator = arguments[i + 1].lastIndex(of: "="),
+                    arguments[i + 1][..<separator].count == 1, let mark = arguments[i + 1].first,
+                    let milliseconds = Int(arguments[i + 1][arguments[i + 1].index(after: separator)...]),
+                    milliseconds >= 0
+                else {
+                    print("--pause expects MARK=MILLISECONDS, e.g. --pause 、=300")
+                    exit(1)
+                }
+                kokoroPauses[mark] = .milliseconds(milliseconds)
+                i += 1
             case "--variant", "--model-variant":
                 if i + 1 < arguments.count {
                     let value = arguments[i + 1].lowercased()
@@ -249,7 +262,8 @@ public struct TTS {
                     if let v = ParadeeVersion(rawValue: raw.hasPrefix("v") ? String(raw.dropFirst()) : raw) {
                         paradeeVersion = v
                     } else {
-                        logger.warning("Unknown --paradee-version '\(arguments[i + 1])'; using 1.2. Valid: 1.0, 1.2.")
+                        logger.warning(
+                            "Unknown --paradee-version '\(arguments[i + 1])'; using 1.3. Valid: 1.0, 1.2, 1.3.")
                     }
                     i += 1
                 }
@@ -463,7 +477,7 @@ public struct TTS {
             await runKokoroAne(
                 text: text, output: output, voice: voice, metricsPath: metricsPath,
                 variant: kokoroAneVariant, version: kokoroVersion, lexiconPath: lexiconPath,
-                treatAsPhonemes: treatAsPhonemes)
+                treatAsPhonemes: treatAsPhonemes, pauses: kokoroPauses)
         case .styletts2:
             await runStyleTTS2(
                 text: text, ipa: styletts2Ipa,
@@ -517,7 +531,7 @@ public struct TTS {
     }
 
     /// Run Paradee-8M TTS. With `--phonemes` the positional text is treated as
-    /// a misaki-style phoneme string and bypasses the English frontend.
+    /// a phoneme string and bypasses the text frontend.
     private static func runParadee(
         text: String, output: String,
         version: ParadeeVersion, variant: ParadeeVariant,
@@ -536,7 +550,7 @@ public struct TTS {
             let manager = ParadeeManager(version: version, variant: variant)
 
             let tLoad0 = Date()
-            try await manager.initialize()
+            try await manager.initialize(voices: [voice])
             let tLoad1 = Date()
 
             logger.info(
@@ -1108,7 +1122,8 @@ public struct TTS {
 
     private static func runKokoroAne(
         text: String, output: String, voice: String, metricsPath: String?,
-        variant: KokoroAneVariant, version: KokoroAneVersion, lexiconPath: String?, treatAsPhonemes: Bool
+        variant: KokoroAneVariant, version: KokoroAneVersion, lexiconPath: String?, treatAsPhonemes: Bool,
+        pauses: [Character: Duration]
     ) async {
         do {
             let tStart = Date()
@@ -1136,6 +1151,8 @@ public struct TTS {
                             + "supports a custom lexicon.")
                 }
             }
+
+            await manager.setPunctuationPauses(pauses)
 
             let tLoad0 = Date()
             try await manager.initialize()
@@ -1755,15 +1772,17 @@ public struct TTS {
                                    supertonic3, luxtts, neutts (beta), inflect (beta),
                                    chatterbox (beta, multilingual, macOS 15+),
                                    chatterbox-nano (beta, English + [laugh]/[chuckle] tags, macOS 15+),
-                                   paradee (beta, 8M English; v1.2 voices af_heart,
-                                     bf_isabella, am_puck, bm_fable)
+                                   paradee (beta, 8M; v1.3 voices af_heart, bf_isabella,
+                                     am_puck, bm_fable, hf_alpha, hm_omega (Hindi),
+                                     ff_siwis (French), em_alex (Spanish))
                                    Paradee:
-                                     --voice af_heart           voice (bf_/bm_ get British phonemes)
-                                     --paradee-version 1.2      release: 1.2 (default) or 1.0 (af_heart only)
+                                     --voice af_heart           voice; its language reads the text
+                                     --paradee-version 1.3      release: 1.3 (default), 1.2 (English) or
+                                                                1.0 (af_heart only)
                                      --variant int8|fp32        weights (default int8)
                                      --speed 1.0                speech rate (default 1.0)
                                      --seed N                   source-noise seed (default 0)
-                                     --phonemes                 treat input as misaki phonemes
+                                     --phonemes                 treat input as phonemes
                                    Chatterbox (built-in voice, 18 languages):
                                      --lang de                  language code (default en)
                                      --seed N                   sampling seed (default 42)
@@ -1803,6 +1822,8 @@ public struct TTS {
                                                               bypasses tone sandhi)
                                    Ignored for KokoroAne English (no lexicon support yet).
               --kokoro-version     Kokoro architecture: legacy (default) or v3 (en/ja/zh, macOS 15 / iOS 18+).
+              --pause MARK=MS      KokoroAne pause at a punctuation mark, in milliseconds
+                                   (repeatable, e.g. --pause 、=300 --pause ，=400).
               --variant            KokoroAne language (values: en,zh,ja,es,fr).
                                    For --backend kokoro-ane --variant zh, Hanzi
                                    input is auto-phonemized through the bundled
