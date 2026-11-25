@@ -24,90 +24,152 @@ final class KokoroAneV3Pipeline {
     private let lock = NSLock()
     private typealias Arrays = KokoroAneV3Arrays
 
+    /// One ANE-v3 package: where it lives, the bundle name, and the units it runs on.
+    /// `key` is the name `run(...)` asks for it by.
+    struct StageSpec: Sendable, Equatable {
+        let key: String
+        let directory: URL
+        let name: String
+        let units: MLComputeUnits
+        let lowPrecision: Bool
+    }
+
     init(
         baseDirectory: URL, fastDirectory: URL, decoderDirectory: URL,
         computeUnits: KokoroAneComputeUnits
     ) throws {
-        func open(
-            _ directory: URL, _ name: String, _ units: MLComputeUnits, lowPrecision: Bool = false
-        ) throws -> MLModel {
-            let compiled = directory.appendingPathComponent(name + ".mlmodelc")
-            let package = directory.appendingPathComponent(name + ".mlpackage")
-            let configuration = MLModelConfiguration()
-            configuration.computeUnits = units
-            configuration.allowLowPrecisionAccumulationOnGPU = lowPrecision
-            // Same "compiled" test KokoroAneV3Assets.ensure uses to skip the
-            // source package (#1043), so the two never disagree about a bundle.
-            if KokoroAneV3Assets.isCompiledBundle(at: compiled) {
-                do {
-                    return try MLModel(contentsOf: compiled, configuration: configuration)
-                } catch {
-                    // Corrupt or no-longer-loadable compiled bundle. Drop it so
-                    // the verified source is recompiled now, or, when the app
-                    // deleted the source, re-fetched by the next ensure().
-                    try? FileManager.default.removeItem(at: compiled)
-                    guard FileManager.default.fileExists(atPath: package.path) else { throw error }
-                }
-            } else if FileManager.default.fileExists(atPath: compiled.path) {
-                // Directory without coremldata.bin: never loadable, recompile.
-                try? FileManager.default.removeItem(at: compiled)
-            }
-            guard FileManager.default.fileExists(atPath: package.path) else {
-                throw KokoroAneV3Error.missingModel(name)
-            }
-            let temporary = try MLModel.compileModel(at: package)
-            defer { try? FileManager.default.removeItem(at: temporary) }
-            let staging = compiled.appendingPathExtension(UUID().uuidString)
-            defer { try? FileManager.default.removeItem(at: staging) }
-            try FileManager.default.copyItem(at: temporary, to: staging)
-            do {
-                try FileManager.default.moveItem(at: staging, to: compiled)
-            } catch {
-                guard FileManager.default.fileExists(atPath: compiled.path) else { throw error }
-            }
-            return try MLModel(contentsOf: compiled, configuration: configuration)
-        }
-        func buckets(_ directory: URL, _ prefix: String) throws -> [Int] {
-            let names = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            return Array(
-                Set(
-                    names.compactMap { url -> Int? in
-                        guard ["mlpackage", "mlmodelc"].contains(url.pathExtension),
-                            url.lastPathComponent.hasPrefix(prefix)
-                        else { return nil }
-                        return Int(url.deletingPathExtension().lastPathComponent.dropFirst(prefix.count))
-                    })
-            ).sorted()
-        }
-        albertBuckets = try buckets(fastDirectory, "KokoroAlbert_")
-        guard !albertBuckets.isEmpty else { throw KokoroAneV3Error.missingModel("Static buckets") }
+        let specs = try Self.stageSpecs(
+            baseDirectory: baseDirectory, fastDirectory: fastDirectory,
+            decoderDirectory: decoderDirectory, computeUnits: computeUnits)
         var loaded: [String: MLModel] = [:]
-        // Base stages follow the caller's routing, so the OS 27 default
-        // (`aneTailCpu`) keeps Noise and Tail off Metal like the legacy chain (#1103).
-        for stage in KokoroAneStage.allCases {
-            let name = stage.rawValue.prefix(1).uppercased() + stage.rawValue.dropFirst()
-            let suffix = [.noise, .prosody, .tail].contains(stage) ? "_v2" : ""
-            loaded[name] = try open(
-                baseDirectory, "Kokoro" + name + suffix, computeUnits.units(for: stage), lowPrecision: true)
+        for spec in specs {
+            loaded[spec.key] = try Self.open(spec)
         }
-        for bucket in albertBuckets {
-            loaded["Albert_\(bucket)"] = try open(fastDirectory, "KokoroAlbert_\(bucket)", .cpuAndNeuralEngine)
-        }
+        albertBuckets = Self.bucketValues(in: specs, prefix: "Albert_")
+        guard !albertBuckets.isEmpty else { throw KokoroAneV3Error.missingModel("Static buckets") }
         if Self.usesFastVocoder(computeUnits) {
             source = try KokoroAneV3NativeSource(
                 parametersURL: fastDirectory.appendingPathComponent("native-source.json"))
-            decoderBuckets = try buckets(decoderDirectory, "KokoroDecoderPre_")
-            guard !decoderBuckets.isEmpty else { throw KokoroAneV3Error.missingModel("Static buckets") }
-            for bucket in decoderBuckets {
-                loaded["Decoder_\(bucket)"] = try open(
-                    decoderDirectory, "KokoroDecoderPre_\(bucket)", .cpuAndNeuralEngine)
-            }
-            loaded["SourceGenerator"] = try open(fastDirectory, "KokoroSourceGenerator", computeUnits.tail)
+            decoderBuckets = Self.bucketValues(in: specs, prefix: "Decoder_")
         } else {
             source = nil
             decoderBuckets = []
         }
         models = loaded
+    }
+
+    /// Every package the pipeline opens for these directories, in load order.
+    /// Reads the bucket names from disk, so the directories must be downloaded first.
+    /// Base stages follow the caller's routing, so the OS 27 default (`aneTailCpu`)
+    /// keeps Noise and Tail off Metal like the legacy chain (#1103).
+    static func stageSpecs(
+        baseDirectory: URL, fastDirectory: URL, decoderDirectory: URL,
+        computeUnits: KokoroAneComputeUnits
+    ) throws -> [StageSpec] {
+        var specs: [StageSpec] = []
+        for stage in KokoroAneStage.allCases {
+            let key = stage.rawValue.prefix(1).uppercased() + stage.rawValue.dropFirst()
+            let suffix = [.noise, .prosody, .tail].contains(stage) ? "_v2" : ""
+            specs.append(
+                StageSpec(
+                    key: key, directory: baseDirectory, name: "Kokoro" + key + suffix,
+                    units: computeUnits.units(for: stage), lowPrecision: true))
+        }
+        let albert = try buckets(fastDirectory, "KokoroAlbert_")
+        guard !albert.isEmpty else { throw KokoroAneV3Error.missingModel("Static buckets") }
+        for bucket in albert {
+            specs.append(
+                StageSpec(
+                    key: "Albert_\(bucket)", directory: fastDirectory, name: "KokoroAlbert_\(bucket)",
+                    units: .cpuAndNeuralEngine, lowPrecision: false))
+        }
+        guard usesFastVocoder(computeUnits) else { return specs }
+        let decoder = try buckets(decoderDirectory, "KokoroDecoderPre_")
+        guard !decoder.isEmpty else { throw KokoroAneV3Error.missingModel("Static buckets") }
+        for bucket in decoder {
+            specs.append(
+                StageSpec(
+                    key: "Decoder_\(bucket)", directory: decoderDirectory, name: "KokoroDecoderPre_\(bucket)",
+                    units: .cpuAndNeuralEngine, lowPrecision: false))
+        }
+        specs.append(
+            StageSpec(
+                key: "SourceGenerator", directory: fastDirectory, name: "KokoroSourceGenerator",
+                units: computeUnits.tail, lowPrecision: false))
+        return specs
+    }
+
+    /// Compiles every package in `specs` into its `.mlmodelc` cache and never constructs an `MLModel`,
+    /// so peak memory is one package's compile, not the whole pipeline.
+    static func compileStages(_ specs: [StageSpec]) throws {
+        for spec in specs {
+            try Task.checkCancellation()
+            _ = try compiledBundle(for: spec)
+        }
+    }
+
+    private static func buckets(_ directory: URL, _ prefix: String) throws -> [Int] {
+        let names = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        return Array(
+            Set(
+                names.compactMap { url -> Int? in
+                    guard ["mlpackage", "mlmodelc"].contains(url.pathExtension),
+                        url.lastPathComponent.hasPrefix(prefix)
+                    else { return nil }
+                    return Int(url.deletingPathExtension().lastPathComponent.dropFirst(prefix.count))
+                })
+        ).sorted()
+    }
+
+    private static func bucketValues(in specs: [StageSpec], prefix: String) -> [Int] {
+        specs.compactMap { spec -> Int? in
+            guard spec.key.hasPrefix(prefix) else { return nil }
+            return Int(spec.key.dropFirst(prefix.count))
+        }
+    }
+
+    private static func open(_ spec: StageSpec) throws -> MLModel {
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = spec.units
+        configuration.allowLowPrecisionAccumulationOnGPU = spec.lowPrecision
+        let compiled = try compiledBundle(for: spec)
+        do {
+            return try MLModel(contentsOf: compiled, configuration: configuration)
+        } catch {
+            // Corrupt or no-longer-loadable compiled bundle. Drop it so the verified
+            // source is recompiled now. With no source on disk, the load error stands.
+            let package = spec.directory.appendingPathComponent(spec.name + ".mlpackage")
+            guard FileManager.default.fileExists(atPath: package.path) else { throw error }
+            try? FileManager.default.removeItem(at: compiled)
+            return try MLModel(contentsOf: try compiledBundle(for: spec), configuration: configuration)
+        }
+    }
+
+    /// The compiled bundle for one package, compiling it first when it is not on disk.
+    private static func compiledBundle(for spec: StageSpec) throws -> URL {
+        let compiled = spec.directory.appendingPathComponent(spec.name + ".mlmodelc")
+        // Same "compiled" test KokoroAneV3Assets.ensure uses to skip the
+        // source package (#1043), so the two never disagree about a bundle.
+        if KokoroAneV3Assets.isCompiledBundle(at: compiled) { return compiled }
+        // Directory without coremldata.bin: never loadable, recompile.
+        if FileManager.default.fileExists(atPath: compiled.path) {
+            try? FileManager.default.removeItem(at: compiled)
+        }
+        let package = spec.directory.appendingPathComponent(spec.name + ".mlpackage")
+        guard FileManager.default.fileExists(atPath: package.path) else {
+            throw KokoroAneV3Error.missingModel(spec.name)
+        }
+        let temporary = try MLModel.compileModel(at: package)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let staging = compiled.appendingPathExtension(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        try FileManager.default.copyItem(at: temporary, to: staging)
+        do {
+            try FileManager.default.moveItem(at: staging, to: compiled)
+        } catch {
+            guard FileManager.default.fileExists(atPath: compiled.path) else { throw error }
+        }
+        return compiled
     }
 
     /// The fast vocoder (masked decoder + SourceGenerator) only pays off when
