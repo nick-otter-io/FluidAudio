@@ -317,6 +317,20 @@ public actor KokoroAneManager {
         englishFrontendReady = true
     }
 
+    /// Downloads and compiles this variant's CoreML stages, default voice pack, and text-frontend
+    /// assets without keeping any stage loaded. Run it in the background before `initialize()`:
+    /// the later load then reads the compiled cache. Peak memory is one stage, not the whole variant.
+    public func compileModels() async throws {
+        try await store.compileModels()
+    }
+
+    /// Downloads voice packs for this variant without loading any model. Packs already on disk are skipped.
+    /// Chinese graded voices (`zf_xiaobei` and the rest) are not published under this variant, so
+    /// callers stage them through the English bundle themselves.
+    public func prefetchVoicePacks(_ voices: [String]) async throws {
+        try await store.prefetchVoicePacks(voices)
+    }
+
     /// Drop loaded mlmodelcs + voice packs. The store reloads on next call.
     public func cleanup() async {
         await store.cleanup()

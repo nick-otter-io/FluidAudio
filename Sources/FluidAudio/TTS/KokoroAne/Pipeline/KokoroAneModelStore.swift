@@ -542,6 +542,80 @@ public actor KokoroAneModelStore {
         }
     }
 
+    /// Downloads and compiles this store's variant without keeping any stage loaded.
+    /// The compiled cache is what the next `loadIfNeeded()` reads.
+    public func compileModels() async throws {
+        if version == .v3 {
+            try await compileV3()
+        } else {
+            try await compileLegacy()
+        }
+    }
+
+    private func compileV3() async throws {
+        guard #available(macOS 15, iOS 18, tvOS 18, *) else {
+            throw KokoroAneError.inputProcessingFailed("ANE-v3 requires macOS 15 / iOS 18 or newer")
+        }
+        try KokoroAneV3Assets.validateVariant(variant)
+        guard [.default, .aneTailGpu, .aneTailCpu].contains(computeUnits) else {
+            throw KokoroAneError.inputProcessingFailed(
+                "ANE-v3 supports the default, aneTailGpu or aneTailCpu routing only")
+        }
+        let root = try await KokoroAneV3Assets.ensure(
+            variant: variant, directory: directory,
+            fastVocoder: KokoroAneV3Pipeline.usesFastVocoder(computeUnits))
+        _ = try await KokoroAneV3Assets.ensureVoice(variant.defaultVoice, variant: variant, root: root)
+        let specs = try KokoroAneV3Pipeline.stageSpecs(
+            baseDirectory: root.appendingPathComponent("base"),
+            fastDirectory: root.appendingPathComponent("fast"),
+            decoderDirectory: root.appendingPathComponent("decoder"),
+            computeUnits: computeUnits)
+        // The compile is synchronous and CPU-heavy, so it runs off the store's executor.
+        try await Task.detached(priority: .utility) {
+            try KokoroAneV3Pipeline.compileStages(specs)
+        }.value
+        try await KokoroAneFrontendAssets.ensure(variant: variant, repoDirectory: root, directory: directory)
+    }
+
+    private func compileLegacy() async throws {
+        let repoDir = try await KokoroAneResourceDownloader.ensureModels(
+            variant: variant, directory: directory,
+            additionalModelNames: vocoderPrecision == .float32 ? [ModelNames.KokoroAne.vocoderFloat32] : [])
+        // Legacy bundles ship compiled, and CoreML specializes each on its first load.
+        // Load one stage, drop it, then the next, so the chain is never resident at once.
+        for stage in KokoroAneStage.allCases {
+            let bundleName = Self.bundleName(for: stage, vocoderPrecision: vocoderPrecision)
+            let url = repoDir.appendingPathComponent(bundleName)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw KokoroAneError.modelNotLoaded(bundleName)
+            }
+            let cfg = MLModelConfiguration()
+            cfg.computeUnits = computeUnits.units(for: stage)
+            cfg.allowLowPrecisionAccumulationOnGPU = true
+            try Task.checkCancellation()
+            _ = try MLModel(contentsOf: url, configuration: cfg)
+        }
+        _ = try await KokoroAneResourceDownloader.ensureVoicePack(
+            variant.defaultVoice, repoDirectory: repoDir, variant: variant)
+        try await KokoroAneFrontendAssets.ensure(variant: variant, repoDirectory: repoDir, directory: directory)
+    }
+
+    /// Downloads voice packs for this variant. Loads no model. Packs already on disk are skipped.
+    public func prefetchVoicePacks(_ voices: [String]) async throws {
+        for voice in voices {
+            try Task.checkCancellation()
+            if version == .v3 {
+                let root = try KokoroAneV3Assets.cacheDirectory(variant: variant, directory: directory)
+                _ = try await KokoroAneV3Assets.ensureVoice(voice, variant: variant, root: root)
+            } else {
+                let repo = try KokoroAneResourceDownloader.repositoryDirectory(
+                    variant: variant, directory: directory)
+                _ = try await KokoroAneResourceDownloader.ensureVoicePack(
+                    voice, repoDirectory: repo, variant: variant)
+            }
+        }
+    }
+
     public func cleanup() {
         loadingTask?.cancel()
         v3Pipeline = nil
